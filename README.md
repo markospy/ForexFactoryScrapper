@@ -1,158 +1,278 @@
 # ForexFactoryScrapper
 
-[![CI](https://github.com/AtaCanYmc/ForexFactoryScrapper/actions/workflows/ci.yml/badge.svg)](https://github.com/AtaCanYmc/ForexFactoryScrapper/actions) [![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue)](https://www.python.org/) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/AtaCanYmc/ForexFactoryScrapper/blob/main/LICENSE)
+[![CI](https://github.com/AtaCanYmc/ForexFactoryScrapper/actions/workflows/ci.yml/badge.svg)](https://github.com/AtaCanYmc/ForexFactoryScrapper/actions)
+[![Docs](https://img.shields.io/badge/docs-mkdocs--material-blue.svg)](https://atacanymc.github.io/ForexFactoryScrapper/)
+[![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-ForexFactoryScrapper is a small Flask-based HTTP API that exposes economic-calendar data (ForexFactory, CryptoCraft, EnergyExch, MetalsMine).
+ForexFactoryScrapper is a Flask REST API service that aggregates and serves economic calendar events from financial portals including ForexFactory, CryptoCraft, EnergyExch, and MetalsMine.
 
-> **Important Architecture Note:**
-> All web scraping logic has been decoupled and is now centrally managed by the [forex-pytory](https://github.com/AtaCanYmc/forex-pytory) package. This API project delegates data fetching entirely to that library and focuses solely on providing a clean, user-friendly REST API interface.
+## Table of Contents
 
-### Why this architecture?
-- **Modularity:** The scraping engine and the web server (API) are independent.
-- **Maintainability:** Any HTML DOM changes on target sites only require updates in `forex-pytory`, leaving the API project untouched.
-- **Single Source of Truth:** Data typing and validation is handled strictly via Pydantic models at the library level.
+- [Architecture](#architecture)
+- [Quick Start](#quick-start)
+  - [Docker](#docker)
+  - [Local Environment](#local-environment)
+- [API Reference](#api-reference)
+  - [Endpoint Overview](#endpoint-overview)
+  - [Daily Events Endpoints](#daily-events-endpoints)
+  - [Multi-Source Bundle Endpoint](#multi-source-bundle-endpoint)
+  - [Sitemap Endpoint](#sitemap-endpoint)
+  - [OpenAPI and Swagger UI](#openapi-and-swagger-ui)
+- [Configuration](#configuration)
+- [Testing and Verification](#testing-and-verification)
+- [Documentation and Developer Commands](#documentation-and-developer-commands)
+- [Frequently Asked Questions](#frequently-asked-questions)
+- [Contributing](#contributing)
+- [Security](#security)
+- [License](#license)
 
-What this repository provides:
-- Flask HTTP API endpoints returning JSON (or HTML for the root page)
-- Simple test-suite using `pytest` under `tests/`
-- A minimal OpenAPI spec (served at `/openapi.json`) and a Swagger UI at `/swagger`
+## Architecture
 
----
+All HTML extraction and DOM parsing logic is isolated within the upstream [`forex-pytory`](https://github.com/AtaCanYmc/forex-pytory) package. ForexFactoryScrapper acts exclusively as an HTTP API layer responsible for request validation, pagination, CORS handling, and OpenAPI schema generation.
 
-## Quick start
+```mermaid
+flowchart TD
+    Client["Client / API Consumer / Swagger UI"] -->|"HTTP GET"| App["Flask Application (src/app.py)"]
+    App --> Blueprints["Route Blueprints (src/routes/)"]
+    Blueprints --> Validation["Parameter & Paging Validator"]
+    Validation --> Engine["forex-pytory (Parsing Engine & Pydantic Models)"]
+    Engine -->|"Scrape HTML"| FF["ForexFactory"]
+    Engine -->|"Scrape HTML"| CC["CryptoCraft"]
+    Engine -->|"Scrape HTML"| MM["MetalsMine"]
+    Engine -->|"Scrape HTML"| EE["EnergyExch"]
+```
 
-1. Create and activate a virtual environment:
+## Quick Start
+
+### Docker
+
+Build and run the containerized service:
 
 ```bash
+# 1. Build the Docker image
+docker build -t forexfactory-scrapper .
+
+# 2. Run container in background
+docker run -d -p 5000:5000 --name forexfactory-scrapper forexfactory-scrapper
+
+# 3. Verify health status
+curl -f http://localhost:5000/api/health
+```
+
+### Local Environment
+
+Prerequisites: Python 3.10, 3.11, or 3.12.
+
+```bash
+# 1. Create and activate virtual environment
 python -m venv .venv
 source .venv/bin/activate
-```
 
-2. Install dependencies:
-
-```bash
-# Note: This will automatically install the scraping engine 'forex-pytory'
+# 2. Install dependencies
 pip install -r requirements.txt
+
+# 3. Start API server
+python main.py
 ```
 
-3. Run the app locally:
+The application listens on `http://0.0.0.0:5000` by default.
+
+Interactive documentation interfaces:
+- Web Welcome Page: `http://localhost:5000/`
+- Swagger UI: `http://localhost:5000/swagger`
+- OpenAPI Specification: `http://localhost:5000/openapi.json`
+
+## API Reference
+
+### Endpoint Overview
+
+| Method | Path | Required Parameters | Optional Parameters | Description |
+| :--- | :--- | :--- | :--- | :--- |
+| `GET` | `/` | None | None | HTML landing page with quick navigation links. |
+| `GET` | `/api/hello` | None | None | Basic sanity check endpoint. |
+| `GET` | `/api/health` | None | None | Service health check returning operational status. |
+| `GET` | `/api/forex/daily` | `day`, `month`, `year` | `limit`, `offset` | ForexFactory economic calendar events for a specific day. |
+| `GET` | `/api/cryptocraft/daily` | `day`, `month`, `year` | `limit`, `offset` | CryptoCraft calendar events for a specific day. |
+| `GET` | `/api/energyexch/daily` | `day`, `month`, `year` | `limit`, `offset` | EnergyExch calendar events for a specific day. |
+| `GET` | `/api/metalsmine/daily` | `day`, `month`, `year` | `limit`, `offset` | MetalsMine calendar events for a specific day. |
+| `GET` | `/api/bundle` | `start_date`, `end_date` | `sources`, `limit`, `offset` | Aggregated economic events across selected platforms for a date range. |
+| `GET` | `/api/forex/sitemaps` | None | `start_date`, `end_date`, `max_pages`, `limit`, `offset` | Paginated sitemap URLs retrieved from ForexFactory. |
+| `GET` | `/swagger` | None | None | Swagger UI documentation console. |
+| `GET` | `/openapi.json` | None | None | Raw OpenAPI 3.0 schema definition. |
+
+### Daily Events Endpoints
+
+Available routes:
+- `/api/forex/daily`
+- `/api/cryptocraft/daily`
+- `/api/energyexch/daily`
+- `/api/metalsmine/daily`
+
+#### Query Parameters
+
+| Parameter | Type | Required | Description |
+| :--- | :--- | :---: | :--- |
+| `day` | Integer | Yes | Calendar day of month (1-31). |
+| `month` | Integer | Yes | Calendar month (1-12). |
+| `year` | Integer | Yes | Four-digit calendar year. |
+| `limit` | Integer | No | Maximum number of records to return. Must be non-negative. |
+| `offset` | Integer | No | Number of records to skip for pagination. Must be non-negative. |
+
+#### Response Schema
+
+```json
+{
+  "total": 14,
+  "offset": 0,
+  "limit": 10,
+  "results": [
+    {
+      "id": "138542",
+      "date": "2026-05-20",
+      "time": "8:30am",
+      "currency": "USD",
+      "impact": "High",
+      "event": "CPI m/m",
+      "actual": "0.3%",
+      "forecast": "0.2%",
+      "previous": "0.4%"
+    }
+  ]
+}
+```
+
+### Multi-Source Bundle Endpoint
+
+Path: `GET /api/bundle`
+
+Retrieves events from multiple calendar providers over a continuous date range.
+
+#### Query Parameters
+
+| Parameter | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `start_date` | String (`YYYY-MM-DD`) | Required | Start date of query range (inclusive). |
+| `end_date` | String (`YYYY-MM-DD`) | Required | End date of query range (inclusive). |
+| `sources` | Comma-separated string | `forex` | Target sources to scrape: `forex`, `crypto`, `metal`, `energy`. |
+| `limit` | Integer | None | Maximum total records to return. |
+| `offset` | Integer | `0` | Number of records to skip across aggregated results. |
+
+#### Example Request
 
 ```bash
-python main.py
-# or
-python src/app.py
+curl "http://localhost:5000/api/bundle?sources=forex,crypto&start_date=2026-05-20&end_date=2026-05-21&limit=25"
 ```
 
-By default the app listens on `0.0.0.0:5000`. You can configure `HOST`, `PORT` and `DEBUG` via environment variables or a `.env` file (the app uses `python-dotenv` if present).
+#### Response Structure
 
-Open the welcome page in your browser: `http://localhost:5000/`
-Open API docs: `http://localhost:5000/swagger`
-Open raw OpenAPI JSON: `http://localhost:5000/openapi.json`
+```json
+{
+  "total": 28,
+  "offset": 0,
+  "limit": 25,
+  "start_date": "2026-05-20",
+  "end_date": "2026-05-21",
+  "sources": ["forex", "crypto"],
+  "source_breakdown": {
+    "forex": 18,
+    "crypto": 10
+  },
+  "results": [
+    {
+      "_source": "forex",
+      "_date": "2026-05-20",
+      "id": "138542",
+      "currency": "USD",
+      "event": "CPI m/m"
+    }
+  ]
+}
+```
 
----
+### Sitemap Endpoint
 
-## Available endpoints
+Path: `GET /api/forex/sitemaps`
 
-- GET `/` — Welcome HTML page (quick links)
-- GET `/api/hello` — simple hello response
-- GET `/api/health` — quick health check
-- GET `/api/forex/daily` — ForexFactory daily events (query params: `day`, `month`, `year`, optional `limit`, `offset`)
-- GET `/api/forex/sitemaps` — ForexFactory sitemap URLs (optional `start_date`, `end_date`, `limit`, `offset`, `max_pages`)
-- GET `/api/cryptocraft/daily` — CryptoCraft daily events (same parameters)
-- GET `/api/energyexch/daily` — EnergyExch daily events (same parameters)
-- GET `/api/metalsmine/daily` — MetalsMine daily events (same parameters)
-- GET `/api/bundle` — Combined economic events from multiple sources within a date range (see below)
+Traverses the ForexFactory sitemap index and child sitemaps to locate indexed historical URLs.
 
-### Daily events endpoints (`/api/.../daily`)
+#### Query Parameters
 
-All `/.../daily` endpoints follow the same validation and paging semantics:
-- Required query parameters: `day`, `month`, `year` (integers)
-- Optional `limit` and `offset` (integers, >= 0)
-- On success, list results are wrapped in a pagination object: `{ total, offset, limit, results }`.
-- On parameter validation error, endpoints return HTTP 400 with JSON: `{ "error": "..." }`.
+| Parameter | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `start_date` | String (`YYYY-MM-DD`) | None | Filter sitemaps with `lastmod` on or after this date. |
+| `end_date` | String (`YYYY-MM-DD`) | None | Filter sitemaps with `lastmod` on or before this date. |
+| `max_pages` | Integer | `10` | Maximum child sitemaps to parse. Must be positive integer. |
+| `limit` | Integer | None | Pagination size for URL list. |
+| `offset` | Integer | `0` | Pagination offset. |
 
-### Sitemap endpoint (`/api/forex/sitemaps`)
+### OpenAPI and Swagger UI
 
-Fetches ForexFactory sitemap-index and child sitemaps to retrieve a paginated list of URLs:
-- Optional `start_date` and `end_date` (ISO format: `YYYY-MM-DD`) — filters results by sitemap lastmod date
-- Optional `limit` and `offset` (integers, >= 0) — standard paging
-- Optional `max_pages` (integer, >= 1, default 10) — limits number of child sitemaps to scan
-- Returns: `{ total, offset, limit, results }` where each result is `{ url, lastmod: date_or_null }`
-- Example: `GET /api/forex/sitemaps?start_date=2026-05-15&max_pages=5`
+The API specification is defined in `src/openapi_spec.py`.
+- Swagger UI is accessible at `/swagger`.
+- Machine-readable schema is served at `/openapi.json`.
 
-### Bundle endpoint (`/api/bundle`)
+When modifying endpoints, keep `src/openapi_spec.py` synchronized with route implementations.
 
-Fetches combined economic events from multiple sources within a date range:
-- Required query parameters:
-  - `start_date` (ISO format: `YYYY-MM-DD`) — Start date (inclusive)
-  - `end_date` (ISO format: `YYYY-MM-DD`) — End date (inclusive)
-- Optional query parameters:
-  - `sources` (comma-separated string, default: `forex`) — Sources to include: `forex`, `crypto`, `metal`, `energy`
-  - `limit` (integer, >= 0) — Max number of results to return
-  - `offset` (integer, >= 0) — Number of records to skip
-- Returns: `{ total, offset, limit, start_date, end_date, sources, source_breakdown, results }`
-  - Each result includes `_source` (which source it came from) and `_date` (which date it was fetched for)
-  - `source_breakdown` shows count of records per source
-- Examples:
-  - `GET /api/bundle?start_date=2026-05-20&end_date=2026-05-25` — forex events for May 20-25
-  - `GET /api/bundle?sources=forex,crypto&start_date=2026-05-20&end_date=2026-05-21&limit=50` — forex and crypto events, max 50 results
+## Configuration
 
----
+The service reads configuration from environment variables or a local `.env` file via `python-dotenv`.
 
-## OpenAPI / Swagger
+| Variable | Type | Default | Required | Description |
+| :--- | :--- | :--- | :---: | :--- |
+| `HOST` | String | `0.0.0.0` | No | Network interface to bind the Flask server. |
+| `PORT` | Integer | `5000` | No | Port number to accept incoming connections. |
+| `DEBUG` | Boolean | `True` | No | Enable Flask debug reloader and error tracebacks. |
+| `DOTENV_PATH` | String (Path) | None | No | Explicit file path to load environment variables from. |
 
-- The OpenAPI document is available at `/openapi.json` and is generated from `src/openapi_spec.py`.
-- The interactive Swagger UI is served at `/swagger` and uses the OpenAPI JSON. If your environment blocks external CDN assets, the UI falls back to an inline minimal page.
+## Testing and Verification
 
-If you update endpoints or schemas, please update `src/openapi_spec.py` accordingly so the docs stay accurate.
-
----
-
-## Environment variables
-
-- `HOST` — host to bind (default `0.0.0.0`)
-- `PORT` — port to bind (default `5000`)
-- `DEBUG` — debug mode (default `True`)
-- `DOTENV_PATH` — optional path to a `.env` file
-
----
-
-## Tests
-
-Run tests with:
+Execute unit and integration tests using pytest:
 
 ```bash
 python -m pytest -q
 ```
 
-Tests are under `tests/` and use `pytest` and the Flask test client. Many tests monkeypatch `src.app` and `main` to avoid network calls.
+Test files are located under `tests/`. External network requests are monkeypatched in test suites to ensure fast and deterministic execution.
 
----
+## Documentation and Developer Commands
 
-## Docker
+A `Makefile` is provided to streamline local development, testing, and documentation generation:
 
-A `Dockerfile` is provided for convenience; if you prefer to run inside Docker, build and run the image as usual (adjust ports as needed).
+| Command | Description |
+| :--- | :--- |
+| `make install` | Install project runtime and testing dependencies. |
+| `make run` | Start the Flask development server on `0.0.0.0:5000`. |
+| `make test` | Execute test suite via pytest. |
+| `make lint` | Run flake8 and black formatting checks. |
+| `make format` | Auto-format Python files with black. |
+| `make docker-build` | Build the container image. |
+| `make docker-run` | Run the containerized service. |
+| `make docs-install` | Install MkDocs Material toolchain. |
+| `make docs-serve` | Start MkDocs local preview server on `127.0.0.1:8000`. |
+| `make docs-build` | Compile static documentation site to `site/`. |
+| `make clean` | Clean pycache and temporary build artifacts. |
 
----
+## Frequently Asked Questions
+
+#### Why is the scraping engine separated into forex-pytory?
+Separating the scraper into `forex-pytory` establishes distinct boundaries between HTTP presentation and HTML parsing. If target sites modify their HTML DOM, parser updates occur exclusively in `forex-pytory` without requiring redeployment or changes to the API routing layer.
+
+#### Does this service cache calendar responses?
+The API does not maintain an internal database or caching layer. Requests trigger live upstream fetches through `forex-pytory`. Upstream rate limits apply based on calling IP frequency.
+
+#### How are invalid dates or parameters handled?
+Parameters are validated before invoking upstream scrapers. Malformed dates, non-integer date components, or negative pagination limits immediately return HTTP 400 with a structured JSON error body: `{"error": "..."}`.
 
 ## Contributing
 
-Contributions welcome. Suggested workflow:
-1. Create a branch for your change
-2. Add tests for any behavior you modify
-3. Run the full test suite
-4. Open a pull request describing the change
+Review development practices, branch naming conventions, and pull request requirements in [CONTRIBUTING.md](CONTRIBUTING.md).
 
-If you modify or add a new scraper under `src/scrapper/`, try to keep the `get_records(url)` and `get_url(day, month, year, timeline)` function signatures so the route helpers can call them interchangeably.
+## Security
 
-**Code of Conduct**: Please read `CODE_OF_CONDUCT.md` before contributing — it describes expected behaviour and reporting contacts.
+To report security vulnerabilities privately, follow the instructions in [SECURITY.md](SECURITY.md).
 
----
+## License
 
-## Contact
-
-Maintainer: Ata Can — atacanymc@gmail.com
-
----
-
-If you want, I can also generate a short `CONTRIBUTING.md` or add CI steps to run lint/tests automatically on PRs. Let me know what else to update.
+This project is licensed under the terms of the [MIT License](LICENSE).
+Copyright (c) 2026 Ata Can Yaymacı.

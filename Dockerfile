@@ -4,10 +4,10 @@ LABEL authors="Ata Can"
 WORKDIR /app
 
 COPY requirements.txt .
-COPY forexFactoryScrapper.py .
-COPY main.py .
-
 RUN pip install --no-cache-dir -r requirements.txt
+
+COPY src/ ./src/
+COPY main.py .
 
 EXPOSE 5000
 

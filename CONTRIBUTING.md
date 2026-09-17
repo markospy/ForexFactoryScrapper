@@ -1,92 +1,85 @@
 # Contributing to ForexFactoryScrapper
 
-Thanks for your interest in contributing! This document explains the preferred workflow and standards for contributing code, tests, docs, or fixes to this repository.
+This document details development workflows, branch naming conventions, and testing requirements for submitting pull requests.
 
-Please follow these steps to make the process smooth and fast for everyone:
+## Code of Conduct
 
-## Code of conduct
-Be respectful and constructive. If you have any concerns about community behavior, contact the maintainer: atacanymc@gmail.com.
+All contributors are expected to adhere to the standards outlined in [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
 
-## Report an issue
-- Search existing issues before opening a new one.
-- When opening an issue, provide a clear title and reproducible steps, environment (OS, Python version), and logs or error messages if applicable.
+## Issue Reporting
 
-## How to contribute
+- Check existing issues before creating a new report.
+- Include a descriptive title, reproduction steps, Python runtime version, operating system, and stack traces.
+
+## Contribution Workflow
+
 1. Fork the repository and create a feature branch from `main`:
-
    ```bash
    git checkout -b feat/my-feature
    ```
+2. Implement your changes. Write pytest cases for any modified or new behavior.
+3. Verify the test suite passes locally.
+4. Keep commits scoped, adhering to Conventional Commits.
+5. Open a pull request targeting `main`.
 
-2. Write tests for any new behavior or bugfix (prefer pytest).
-3. Run the test suite locally and make sure all tests pass.
-4. Keep commits small and focused. Use clear commit messages.
-5. Open a pull request against the `main` branch and describe the change and why it is needed.
+### Branch Naming Conventions
 
-### Branch naming conventions
-- `feat/<short-description>` — new features
-- `fix/<short-description>` — bug fixes
-- `chore/<short-description>` — maintenance tasks
-- `docs/<short-description>` — documentation-only changes
+- `feat/<description>`: New endpoint or capability.
+- `fix/<description>`: Bug fix or corrective change.
+- `chore/<description>`: Dependency updates or build tooling.
+- `docs/<description>`: Documentation additions or updates.
 
-### Commit message style
-Keep messages short and descriptive. Example:
+### Conventional Commit Specifications
 
+All commit messages must follow the Conventional Commits format to facilitate automated release tagging and changelog updates via Release Please:
+
+```text
+<type>(<scope>): <description>
+
+[optional body]
 ```
+
+Example:
+```text
 feat(routes): add cryptocraft daily endpoint
 
-Add new endpoint and tests that validate paging behavior.
+Add endpoint and pagination unit tests for cryptocraft daily events.
 ```
 
-## Pull request checklist
-Before requesting review, ensure the following:
-- [ ] The PR targets `main` (or the branch specified by the maintainers).
-- [ ] Tests were added or updated for new behavior.
-- [ ] All tests pass locally: `python -m pytest -q`.
-- [ ] The `README.md` and `src/openapi_spec.py` are updated if public APIs changed.
-- [ ] If appropriate, run `pre-commit` hooks locally: `pre-commit run --all-files`.
+## Local Development & Testing
 
-## Testing locally
-- Create and activate a virtualenv:
+1. Create and activate a Python virtual environment:
+   ```bash
+   python -m venv .venv
+   source .venv/bin/activate
+   pip install -r requirements.txt
+   ```
 
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
+2. Execute automated test suite:
+   ```bash
+   python -m pytest -q
+   ```
 
-- Run tests:
+3. Run the development server:
+   ```bash
+   python main.py
+   ```
+   The server binds to `http://127.0.0.1:5000` by default.
 
-```bash
-python -m pytest -q
-```
+## Code Quality & Pre-commit
 
-- Run the app locally for manual testing:
-
-```bash
-python main.py
-# then open http://localhost:5000/ in your browser
-```
-
-## Linting / formatting
-- This repository includes `pre-commit` in `requirements.txt`. Install and run hooks:
+Install and run pre-commit hooks before pushing changes:
 
 ```bash
 pre-commit install
 pre-commit run --all-files
 ```
 
-If you don’t have `pre-commit` installed globally, you can run it from the virtualenv: `python -m pre_commit run --all-files`.
+## API Specifications
 
-## Documentation and OpenAPI
-- The OpenAPI spec is maintained in `src/openapi_spec.py`. If you add or change public endpoints or response formats, please update that file so `/openapi.json` and the Swagger UI remain accurate.
-- Update `README.md` for any end-user visible change.
+Public API schemas are maintained in `src/openapi_spec.py`. When introducing or modifying endpoints, update this file so `/openapi.json` and the Swagger UI at `/swagger` reflect the accurate contract.
 
-## Security
-- Do not commit secrets or credentials. Use environment variables or `.env` files excluded via `.gitignore`.
-- If you discover a security vulnerability, contact the maintainer privately at atacanymc@gmail.com before opening a public issue.
+## Security Disclosures
 
-## Getting help
-If you need guidance on where to start, open an issue titled `help wanted` with what you’d like to work on — the maintainer or contributors will respond with suggestions.
+Do not open public GitHub issues for security vulnerabilities. Refer to [SECURITY.md](SECURITY.md) for reporting guidelines.
 
-Thank you for contributing and helping improve ForexFactoryScrapper!
