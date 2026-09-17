@@ -1,3 +1,5 @@
+![ForexFactoryScrapper Banner](docs/assets/banner.jpg)
+
 # ForexFactoryScrapper
 
 [![CI](https://github.com/AtaCanYmc/ForexFactoryScrapper/actions/workflows/ci.yml/badge.svg)](https://github.com/AtaCanYmc/ForexFactoryScrapper/actions)

@@ -1,3 +1,5 @@
+![ForexFactoryScrapper Banner](assets/banner.jpg)
+
 # ForexFactoryScrapper
 
 ForexFactoryScrapper is a Flask REST API service that aggregates and serves economic calendar events from financial portals including ForexFactory, CryptoCraft, EnergyExch, and MetalsMine.
