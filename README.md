@@ -80,6 +80,34 @@ python main.py
 
 The application listens on `http://0.0.0.0:5000` by default.
 
+### Historical fundamentals export
+
+`scripts/download_fundamentals.py` downloads ForexFactory events from
+2015-01-01 through 2026-08-30 by default. It discovers pairs from
+`backend/data/market/*.parquet`, associates each event with the matching
+currency, keeps the raw daily responses in `raw/YYYY-MM-DD.json`, and writes a
+typed `calendar.parquet` for queries. The temporary normalized JSONL files in
+`staging/` and `progress.json` make the process resumable after a VPS
+disconnect or restart.
+
+`calendar.parquet` contains `event_id`, UTC `release_at`, `time_kind`,
+`currency`, `event_name`, normalized `impact`, numeric
+`actual`/`forecast`/`previous`, their `unit`, the original `*_raw` values, and
+`source`.
+
+From the repository root:
+
+```bash
+cd ForexFactoryScrapper
+python -m pip install -r requirements.txt
+python scripts/download_fundamentals.py \
+  --parquet-dir ../backend/data/market \
+  --output-dir /data/forex-fundamentals
+```
+
+Use `--dry-run` to verify the discovered pairs, `--max-days 3` for a short
+test, and `--force` to redownload days already listed in `progress.json`.
+
 Interactive documentation interfaces:
 - Web Welcome Page: `http://localhost:5000/`
 - Swagger UI: `http://localhost:5000/swagger`
