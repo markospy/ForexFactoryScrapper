@@ -113,7 +113,14 @@ def release_timestamp(day: date, raw_time: Any) -> tuple[datetime, str]:
         kind = "scheduled"
 
     if kind == "scheduled":
-        for pattern in ("%m/%d/%Y %H:%M", "%m/%d/%Y %I:%M%p", "%m/%d/%Y %I:%M %p"):
+        for pattern in (
+            "%d/%m/%Y %H:%M",
+            "%d/%m/%Y %I:%M%p",
+            "%d/%m/%Y %I:%M %p",
+            "%m/%d/%Y %H:%M",
+            "%m/%d/%Y %I:%M%p",
+            "%m/%d/%Y %I:%M %p",
+        ):
             try:
                 parsed_datetime = datetime.strptime(text.upper(), pattern)
                 local = parsed_datetime.replace(tzinfo=NEW_YORK)
