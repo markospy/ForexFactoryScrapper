@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Download and build a typed ForexFactory economic-calendar Parquet.
 
-The raw response is retained as JSON and the queryable derivative is a single
+Each day is fetched once. The original HTML is retained for auditability, the
+parsed response is retained as JSON, and the queryable derivative is a single
 ``calendar.parquet`` with UTC timestamps and typed numeric values.
 """
 
@@ -48,6 +49,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--end", type=date.fromisoformat, default=date(2026, 8, 30))
     parser.add_argument("--retry-count", type=int, default=5)
     parser.add_argument("--retry-delay", type=float, default=5.0)
+    parser.add_argument(
+        "--blocked-delay",
+        type=float,
+        default=60.0,
+        help="Minimum retry delay for HTTP 403/429 responses.",
+    )
     parser.add_argument("--request-delay", type=float, default=1.0)
     parser.add_argument("--max-days", type=int, help="Stop after this many new days.")
     parser.add_argument("--force", action="store_true", help="Redownload completed days.")
@@ -87,6 +94,7 @@ def get_field(record: dict[str, Any], name: str) -> Any:
 
 def parse_event_value(value: Any) -> tuple[float | None, str]:
     raw = "" if value is None else str(value).strip()
+    raw = raw.replace(",", "")
     match = re.fullmatch(r"([+-]?(?:\d+(?:\.\d*)?|\.\d+))\s*([KMB%]?)", raw, re.IGNORECASE)
     if not match:
         return None, ""
@@ -107,20 +115,18 @@ def release_timestamp(day: date, raw_time: Any) -> tuple[datetime, str]:
     text = "" if raw_time is None else str(raw_time).strip().lower()
     if "tentative" in text:
         kind = "tentative"
-    elif not text or "all day" in text or text in {"day", "-", "n/a"}:
+    elif (
+        not text
+        or "all day" in text
+        or text in {"day", "-", "n/a"}
+        or re.fullmatch(r"day\s+\d+", text) is not None
+    ):
         kind = "all_day"
     else:
         kind = "scheduled"
 
     if kind == "scheduled":
-        for pattern in (
-            "%d/%m/%Y %H:%M",
-            "%d/%m/%Y %I:%M%p",
-            "%d/%m/%Y %I:%M %p",
-            "%m/%d/%Y %H:%M",
-            "%m/%d/%Y %I:%M%p",
-            "%m/%d/%Y %I:%M %p",
-        ):
+        for pattern in ("%d/%m/%Y %H:%M", "%d/%m/%Y %I:%M%p", "%d/%m/%Y %I:%M %p"):
             try:
                 parsed_datetime = datetime.strptime(text.upper(), pattern)
                 local = parsed_datetime.replace(tzinfo=NEW_YORK)
@@ -146,7 +152,9 @@ def release_timestamp(day: date, raw_time: Any) -> tuple[datetime, str]:
     return datetime.combine(day + timedelta(days=1), datetime_time.min, tzinfo=timezone.utc), kind
 
 
-def normalize_event(day: date, raw_record: dict[str, Any]) -> dict[str, Any] | None:
+def normalize_event(
+    day: date, raw_record: dict[str, Any], raw_time: str | None = None
+) -> dict[str, Any] | None:
     currency = str(get_field(raw_record, "Currency") or "").upper()
     if currency not in FOREX_CURRENCIES:
         return None
@@ -154,21 +162,37 @@ def normalize_event(day: date, raw_record: dict[str, Any]) -> dict[str, Any] | N
     if not event_name:
         return None
     event_day = parse_event_date(get_field(raw_record, "Date"), day)
-    release_at, time_kind = release_timestamp(event_day, get_field(raw_record, "Time"))
+    release_at, time_kind = release_timestamp(
+        event_day, get_field(raw_record, "Time") if raw_time is None else raw_time
+    )
     impact = str(get_field(raw_record, "Impact") or "").strip().lower()
-    impact = {"high impact": "high", "medium impact": "medium", "low impact": "low"}.get(impact, impact)
-    actual_raw = "" if get_field(raw_record, "Actual") is None else str(get_field(raw_record, "Actual")).strip()
-    forecast_raw = "" if get_field(raw_record, "Forecast") is None else str(get_field(raw_record, "Forecast")).strip()
-    previous_raw = "" if get_field(raw_record, "Previous") is None else str(get_field(raw_record, "Previous")).strip()
+    impact = {
+        "high impact": "high",
+        "medium impact": "medium",
+        "low impact": "low",
+        "n/a": "holiday",
+    }.get(impact, impact)
+
+    def clean_raw_value(name: str) -> str:
+        value = get_field(raw_record, name)
+        text = "" if value is None else str(value).strip()
+        return "" if text.lower() in {"", "n/a", "na"} else text
+
+    actual_raw = clean_raw_value("Actual")
+    forecast_raw = clean_raw_value("Forecast")
+    previous_raw = clean_raw_value("Previous")
     actual, actual_unit = parse_event_value(actual_raw)
     forecast, forecast_unit = parse_event_value(forecast_raw)
     previous, previous_unit = parse_event_value(previous_raw)
     unit = actual_unit or forecast_unit or previous_unit
+    source_event_id = get_field(raw_record, "ID")
+    source_event_id = None if source_event_id is None else str(source_event_id).strip() or None
     event_id = hashlib.sha256(
         f"{release_at.isoformat()}|{currency}|{event_name}".encode("utf-8")
     ).hexdigest()
     return {
         "event_id": event_id,
+        "source_event_id": source_event_id,
         "release_at": release_at,
         "time_kind": time_kind,
         "currency": currency,
@@ -185,7 +209,41 @@ def normalize_event(day: date, raw_record: dict[str, Any]) -> dict[str, Any] | N
     }
 
 
-def fetch_day(day: date, retry_count: int, retry_delay: float) -> list[dict[str, Any]]:
+def exception_status_code(error: BaseException) -> int | None:
+    current: BaseException | None = error
+    while current is not None:
+        response = getattr(current, "response", None)
+        status_code = getattr(response, "status_code", None)
+        if isinstance(status_code, int):
+            return status_code
+        current = current.__cause__ or current.__context__
+    return None
+
+
+def extract_raw_times(html: str) -> dict[str, str]:
+    try:
+        from bs4 import BeautifulSoup
+    except ImportError as exc:
+        raise RuntimeError("Install beautifulsoup4 before parsing raw calendar HTML") from exc
+
+    soup = BeautifulSoup(html, "html.parser")
+    raw_times: dict[str, str] = {}
+    last_time = ""
+    for row in soup.select("tr.calendar__row[data-event-id]"):
+        event_id = row.get("data-event-id")
+        if not event_id:
+            continue
+        cell = row.select_one("td.calendar__time")
+        text = cell.get_text(" ", strip=True) if cell is not None else ""
+        if text:
+            last_time = text
+        raw_times[event_id] = last_time
+    return raw_times
+
+
+def fetch_day(
+    day: date, retry_count: int, retry_delay: float, blocked_delay: float
+) -> tuple[list[dict[str, Any]], dict[str, str], str]:
     try:
         from forex_pytory.core.scraper import forex_factory_scraper
     except ImportError as exc:
@@ -197,17 +255,23 @@ def fetch_day(day: date, retry_count: int, retry_delay: float) -> list[dict[str,
             url = forex_factory_scraper.get_url(
                 day=day.day, month=day.month, year=day.year, timeline="day"
             )
-            return [record_to_dict(item) for item in forex_factory_scraper.get_records(url)]
+            html = forex_factory_scraper.get_forex_page_html(url)
+            records = forex_factory_scraper.parse_calendar_from_html(html, url)
+            return [record_to_dict(item) for item in records], extract_raw_times(html), html
         except Exception as exc:  # Network and parser errors must be retried on a VPS.
             last_error = exc
             if attempt >= retry_count:
                 break
             delay = retry_delay * (2**attempt)
+            status_code = exception_status_code(exc)
+            if status_code in {403, 429}:
+                delay = max(delay, blocked_delay * (2**attempt))
             LOGGER.warning(
-                "Fetch failed for %s (attempt %d/%d): %s; retrying in %.1fs",
+                "Fetch failed for %s (attempt %d/%d, status=%s): %s; retrying in %.1fs",
                 day,
                 attempt + 1,
                 retry_count + 1,
+                status_code or "unknown",
                 exc,
                 delay,
             )
@@ -216,7 +280,10 @@ def fetch_day(day: date, retry_count: int, retry_delay: float) -> list[dict[str,
 
 
 def events_for_currencies(
-    day: date, records: Iterable[dict[str, Any]], symbols: dict[str, tuple[str, str]]
+    day: date,
+    records: Iterable[dict[str, Any]],
+    symbols: dict[str, tuple[str, str]],
+    raw_times: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     currencies = {currency for pair in symbols.values() for currency in pair}
     events: list[dict[str, Any]] = []
@@ -224,7 +291,13 @@ def events_for_currencies(
         currency = str(get_field(raw_record, "Currency") or "").upper()
         if currency not in currencies:
             continue
-        normalized = normalize_event(day, raw_record)
+        source_event_id = get_field(raw_record, "ID")
+        source_event_id = None if source_event_id is None else str(source_event_id)
+        normalized = normalize_event(
+            day,
+            raw_record,
+            raw_time=(raw_times or {}).get(source_event_id) if source_event_id else None,
+        )
         if normalized is not None:
             events.append(normalized)
     return events
@@ -268,6 +341,16 @@ def write_jsonl_file(path: Path, records: Iterable[dict[str, Any]]) -> None:
     temporary_path.replace(path)
 
 
+def write_text_file(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as stream:
+        temporary_path = Path(stream.name)
+        stream.write(content)
+        stream.flush()
+        os.fsync(stream.fileno())
+    temporary_path.replace(path)
+
+
 def consolidate_to_parquet(staging_dir: Path, output_dir: Path) -> None:
     try:
         import pyarrow as pa
@@ -281,12 +364,14 @@ def consolidate_to_parquet(staging_dir: Path, output_dir: Path) -> None:
             for line in stream:
                 event = json.loads(line)
                 event["release_at"] = datetime.fromisoformat(event["release_at"])
-                events_by_id[event["event_id"]] = event
+                dedupe_key = event.get("source_event_id") or event["event_id"]
+                events_by_id[dedupe_key] = event
 
     output_dir.mkdir(parents=True, exist_ok=True)
     rows = sorted(events_by_id.values(), key=lambda event: event["release_at"])
     schema = pa.schema([
         ("event_id", pa.string()),
+        ("source_event_id", pa.string()),
         ("release_at", pa.timestamp("us", tz="UTC")),
         ("time_kind", pa.string()),
         ("currency", pa.string()),
@@ -325,7 +410,7 @@ def main() -> int:
     args = parse_args()
     if args.start > args.end:
         raise SystemExit("--start must be on or before --end")
-    if args.retry_count < 0 or args.retry_delay < 0 or args.request_delay < 0:
+    if args.retry_count < 0 or args.retry_delay < 0 or args.blocked_delay < 0 or args.request_delay < 0:
         raise SystemExit("retry and request delays must be non-negative")
 
     logging.basicConfig(
@@ -345,28 +430,34 @@ def main() -> int:
     processed = 0
     current = args.start
 
-    while current <= args.end:
-        day_key = current.isoformat()
-        daily_path = staging_dir / f"{day_key}.jsonl"
-        raw_path = args.output_dir / "raw" / f"{day_key}.json"
-        if day_key in done and daily_path.exists() and not args.force:
-            current += timedelta(days=1)
-            continue
-        if args.max_days is not None and processed >= args.max_days:
-            break
+    try:
+        while current <= args.end:
+            day_key = current.isoformat()
+            daily_path = staging_dir / f"{day_key}.jsonl"
+            raw_path = args.output_dir / "raw" / f"{day_key}.json"
+            html_path = args.output_dir / "raw" / f"{day_key}.html"
+            if day_key in done and daily_path.exists() and not args.force:
+                current += timedelta(days=1)
+                continue
+            if args.max_days is not None and processed >= args.max_days:
+                break
 
-        records = fetch_day(current, args.retry_count, args.retry_delay)
-        events = events_for_currencies(current, records, symbols)
-        write_json_file(raw_path, records)
-        write_jsonl_file(daily_path, events)
-        done.add(day_key)
-        write_progress(progress_path, done, symbols)
-        processed += 1
-        LOGGER.info("Completed %s: %d source events, %d currency events", current, len(records), len(events))
-        current += timedelta(days=1)
-        if current <= args.end:
-            time.sleep(args.request_delay)
-    consolidate_to_parquet(staging_dir, args.output_dir)
+            records, raw_times, html = fetch_day(
+                current, args.retry_count, args.retry_delay, args.blocked_delay
+            )
+            events = events_for_currencies(current, records, symbols, raw_times)
+            write_json_file(raw_path, records)
+            write_text_file(html_path, html)
+            write_jsonl_file(daily_path, events)
+            done.add(day_key)
+            write_progress(progress_path, done, symbols)
+            processed += 1
+            LOGGER.info("Completed %s: %d source events, %d currency events", current, len(records), len(events))
+            current += timedelta(days=1)
+            if current <= args.end:
+                time.sleep(args.request_delay)
+    finally:
+        consolidate_to_parquet(staging_dir, args.output_dir)
     LOGGER.info("Finished: %d new days, output=%s", processed, args.output_dir)
     return 0
 

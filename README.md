@@ -85,15 +85,28 @@ The application listens on `http://0.0.0.0:5000` by default.
 `scripts/download_fundamentals.py` downloads ForexFactory events from
 2015-01-01 through 2026-08-30 by default. It discovers pairs from
 `backend/data/market/*.parquet`, associates each event with the matching
-currency, keeps the raw daily responses in `raw/YYYY-MM-DD.json`, and writes a
-typed `calendar.parquet` for queries. The temporary normalized JSONL files in
+currency, keeps the parsed response in `raw/YYYY-MM-DD.json` and the original
+page in `raw/YYYY-MM-DD.html`, and writes a typed `calendar.parquet` for
+queries. The temporary normalized JSONL files in
 `staging/` and `progress.json` make the process resumable after a VPS
 disconnect or restart.
 
-`calendar.parquet` contains `event_id`, UTC `release_at`, `time_kind`,
-`currency`, `event_name`, normalized `impact`, numeric
+`calendar.parquet` contains the deterministic `event_id`, the original
+ForexFactory `source_event_id` when available, UTC `release_at`, `time_kind`,
+`currency`, `event_name`, normalized `impact` (including `holiday`), numeric
 `actual`/`forecast`/`previous`, their `unit`, the original `*_raw` values, and
 `source`.
+
+The HTML is downloaded once per day and parsed both by `forex-pytory` and by
+the exporter. The original `calendar__time` cell is used for `time_kind`, so
+`All Day`, `Tentative`, and `Day N` are preserved instead of being confused
+with midnight schedules.
+
+The JSON response is retained for compatibility and quick inspection; the
+HTML is the authoritative raw artifact because it preserves the original time
+cell. Expect roughly 110-160 KB of HTML per day, or about 600 MB uncompressed
+for the complete historical range. Compressing `raw/` after the download is a
+reasonable disk-saving measure.
 
 From the repository root:
 
@@ -106,7 +119,10 @@ python scripts/download_fundamentals.py \
 ```
 
 Use `--dry-run` to verify the discovered pairs, `--max-days 3` for a short
-test, and `--force` to redownload days already listed in `progress.json`.
+test, `--blocked-delay 60` to wait longer after HTTP 403/429 responses, and
+`--force` to redownload days already listed in `progress.json`. A failed day
+is not marked complete; the existing staging files are consolidated before
+the error is returned so the next run can resume safely.
 
 Interactive documentation interfaces:
 - Web Welcome Page: `http://localhost:5000/`
