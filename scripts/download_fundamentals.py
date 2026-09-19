@@ -113,6 +113,14 @@ def release_timestamp(day: date, raw_time: Any) -> tuple[datetime, str]:
         kind = "scheduled"
 
     if kind == "scheduled":
+        for pattern in ("%m/%d/%Y %H:%M", "%m/%d/%Y %I:%M%p", "%m/%d/%Y %I:%M %p"):
+            try:
+                parsed_datetime = datetime.strptime(text.upper(), pattern)
+                local = parsed_datetime.replace(tzinfo=NEW_YORK)
+                return local.astimezone(timezone.utc), kind
+            except ValueError:
+                continue
+
         parsed_time: datetime_time | None = None
         for pattern in ("%I:%M%p", "%I:%M %p", "%H:%M"):
             try:
@@ -351,8 +359,7 @@ def main() -> int:
         current += timedelta(days=1)
         if current <= args.end:
             time.sleep(args.request_delay)
-    if expected_days(args.start, args.end).issubset(done):
-        consolidate_to_parquet(staging_dir, args.output_dir)
+    consolidate_to_parquet(staging_dir, args.output_dir)
     LOGGER.info("Finished: %d new days, output=%s", processed, args.output_dir)
     return 0
 
