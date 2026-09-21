@@ -1,10 +1,12 @@
 from datetime import date
+from zoneinfo import ZoneInfo
 
 from scripts.download_fundamentals import (
     exception_status_code,
     extract_raw_times,
     normalize_event,
     release_timestamp,
+    verify_anchor,
 )
 
 
@@ -53,10 +55,35 @@ def test_normalize_event_parses_real_time_and_thousands_separators():
 
 
 def test_release_timestamp_rejects_ambiguous_month_first_dates():
-    timestamp, kind = release_timestamp(date(2020, 10, 1), "01/10/2020 08:30")
+    timestamp, kind = release_timestamp(
+        date(2020, 10, 1), "01/10/2020 08:30", ZoneInfo("America/New_York")
+    )
 
     assert kind == "scheduled"
     assert timestamp.isoformat() == "2020-10-01T12:30:00+00:00"
+
+
+def test_release_timestamp_uses_page_timezone_across_dst_windows():
+    madrid = ZoneInfo("Europe/Madrid")
+
+    summer, _ = release_timestamp(date(2015, 8, 3), "03/08/2015 09:15", madrid)
+    winter, _ = release_timestamp(date(2015, 1, 9), "09/01/2015 14:30", madrid)
+    march_window, _ = release_timestamp(date(2020, 3, 13), "13/03/2020 13:30", madrid)
+
+    assert summer.isoformat() == "2015-08-03T07:15:00+00:00"
+    assert winter.isoformat() == "2015-01-09T13:30:00+00:00"
+    assert march_window.isoformat() == "2020-03-13T12:30:00+00:00"
+
+
+def test_verify_anchor_accepts_page_time_that_maps_to_new_york_0830():
+    records = [{
+        "ID": "1",
+        "Date": "10/01/2020",
+        "Event": "Non-Farm Employment Change",
+        "Time": "14:30",
+    }]
+
+    verify_anchor(records, {"1": "10/01/2020 14:30"}, ZoneInfo("Europe/Madrid"))
 
 
 def test_exception_status_code_reads_nested_http_response():

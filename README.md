@@ -115,14 +115,32 @@ cd ForexFactoryScrapper
 python -m pip install -r requirements.txt
 python scripts/download_fundamentals.py \
   --parquet-dir ../backend/data/market \
+  --page-tz Europe/Madrid \
   --output-dir /data/forex-fundamentals
 ```
+
+`--page-tz` is mandatory because ForexFactory renders the clock according to
+the visitor. The exporter probes a known Non-Farm Employment Change before the
+historical run and aborts if the declared zone does not map the page time to
+08:30 America/New_York. Use `--skip-anchor-check` only for tests.
 
 Use `--dry-run` to verify the discovered pairs, `--max-days 3` for a short
 test, `--blocked-delay 60` to wait longer after HTTP 403/429 responses, and
 `--force` to redownload days already listed in `progress.json`. A failed day
 is not marked complete; the existing staging files are consolidated before
-the error is returned so the next run can resume safely.
+the error is returned so the next run can resume safely. The selected page
+timezone is written to `progress.json` and Parquet metadata.
+
+To correct a completed export without network traffic, keep the matching raw
+JSON and HTML files and run:
+
+```bash
+python scripts/download_fundamentals.py \
+  --parquet-dir ../backend/data/market \
+  --output-dir /data/forex-fundamentals \
+  --page-tz Europe/Madrid \
+  --rebuild-from-raw
+```
 
 Interactive documentation interfaces:
 - Web Welcome Page: `http://localhost:5000/`

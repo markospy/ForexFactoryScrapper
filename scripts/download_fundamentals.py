@@ -20,13 +20,16 @@ from datetime import date, datetime, time as datetime_time, timedelta, timezone
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any, Iterable
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 LOGGER = logging.getLogger("download_fundamentals")
 SYMBOL_RE = re.compile(r"^[A-Z]{6}$")
 FOREX_CURRENCIES = {"AUD", "CAD", "CHF", "EUR", "GBP", "JPY", "NZD", "USD"}
-NEW_YORK = ZoneInfo("America/New_York")
+ANCHOR_EVENT_NAME = "Non-Farm Employment Change"
+ANCHOR_TZ = ZoneInfo("America/New_York")
+ANCHOR_DAY = date(2020, 1, 10)
+ANCHOR_WALL_CLOCK = (8, 30)
 
 
 def parse_args() -> argparse.Namespace:
@@ -47,6 +50,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--start", type=date.fromisoformat, default=date(2015, 1, 1))
     parser.add_argument("--end", type=date.fromisoformat, default=date(2026, 8, 30))
+    parser.add_argument(
+        "--page-tz",
+        required=True,
+        help="Timezone used by ForexFactory for the page clock, for example Europe/Madrid.",
+    )
     parser.add_argument("--retry-count", type=int, default=5)
     parser.add_argument("--retry-delay", type=float, default=5.0)
     parser.add_argument(
@@ -58,6 +66,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--request-delay", type=float, default=1.0)
     parser.add_argument("--max-days", type=int, help="Stop after this many new days.")
     parser.add_argument("--force", action="store_true", help="Redownload completed days.")
+    parser.add_argument(
+        "--rebuild-from-raw",
+        action="store_true",
+        help="Rebuild staging and Parquet from saved raw JSON/HTML without network access.",
+    )
+    parser.add_argument(
+        "--skip-anchor-check",
+        action="store_true",
+        help="Skip the ForexFactory timezone anchor check (tests only).",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Only list discovered pairs.")
     return parser.parse_args()
 
@@ -111,7 +129,9 @@ def parse_event_date(value: Any, fallback: date) -> date:
     return fallback
 
 
-def release_timestamp(day: date, raw_time: Any) -> tuple[datetime, str]:
+def release_timestamp(
+    day: date, raw_time: Any, page_tz: ZoneInfo
+) -> tuple[datetime, str]:
     text = "" if raw_time is None else str(raw_time).strip().lower()
     if "tentative" in text:
         kind = "tentative"
@@ -129,7 +149,7 @@ def release_timestamp(day: date, raw_time: Any) -> tuple[datetime, str]:
         for pattern in ("%d/%m/%Y %H:%M", "%d/%m/%Y %I:%M%p", "%d/%m/%Y %I:%M %p"):
             try:
                 parsed_datetime = datetime.strptime(text.upper(), pattern)
-                local = parsed_datetime.replace(tzinfo=NEW_YORK)
+                local = parsed_datetime.replace(tzinfo=page_tz)
                 return local.astimezone(timezone.utc), kind
             except ValueError:
                 continue
@@ -145,7 +165,7 @@ def release_timestamp(day: date, raw_time: Any) -> tuple[datetime, str]:
             LOGGER.warning("Unknown event time %r on %s; treating as all_day", raw_time, day)
             kind = "all_day"
         else:
-            local = datetime.combine(day, parsed_time, tzinfo=NEW_YORK)
+            local = datetime.combine(day, parsed_time, tzinfo=page_tz)
             return local.astimezone(timezone.utc), kind
 
     # No release clock exists. The UTC day boundary prevents early disclosure.
@@ -153,7 +173,10 @@ def release_timestamp(day: date, raw_time: Any) -> tuple[datetime, str]:
 
 
 def normalize_event(
-    day: date, raw_record: dict[str, Any], raw_time: str | None = None
+    day: date,
+    raw_record: dict[str, Any],
+    raw_time: str | None = None,
+    page_tz: ZoneInfo = ANCHOR_TZ,
 ) -> dict[str, Any] | None:
     currency = str(get_field(raw_record, "Currency") or "").upper()
     if currency not in FOREX_CURRENCIES:
@@ -163,7 +186,9 @@ def normalize_event(
         return None
     event_day = parse_event_date(get_field(raw_record, "Date"), day)
     release_at, time_kind = release_timestamp(
-        event_day, get_field(raw_record, "Time") if raw_time is None else raw_time
+        event_day,
+        get_field(raw_record, "Time") if raw_time is None else raw_time,
+        page_tz,
     )
     impact = str(get_field(raw_record, "Impact") or "").strip().lower()
     impact = {
@@ -279,11 +304,45 @@ def fetch_day(
     raise RuntimeError(f"Could not fetch {day}") from last_error
 
 
+def verify_anchor(
+    records: Iterable[dict[str, Any]],
+    raw_times: dict[str, str],
+    page_tz: ZoneInfo,
+) -> None:
+    for record in records:
+        if get_field(record, "Event") != ANCHOR_EVENT_NAME:
+            continue
+        source_event_id = get_field(record, "ID")
+        raw_time = raw_times.get(str(source_event_id)) if source_event_id is not None else None
+        event_day = parse_event_date(get_field(record, "Date"), ANCHOR_DAY)
+        timestamp, kind = release_timestamp(event_day, raw_time or get_field(record, "Time"), page_tz)
+        local = timestamp.astimezone(ANCHOR_TZ)
+        if kind != "scheduled" or (local.hour, local.minute) != ANCHOR_WALL_CLOCK:
+            raise SystemExit(
+                f"Timezone anchor failed: {ANCHOR_EVENT_NAME} on {ANCHOR_DAY} was "
+                f"{raw_time or get_field(record, 'Time')!r} with --page-tz "
+                f"{page_tz.key}, producing {local.strftime('%H:%M %Z')}; "
+                f"expected {ANCHOR_WALL_CLOCK[0]:02d}:{ANCHOR_WALL_CLOCK[1]:02d} "
+                f"{ANCHOR_TZ.key}."
+            )
+        LOGGER.info(
+            "Timezone anchor passed: %s at %s page time -> %s",
+            ANCHOR_EVENT_NAME,
+            raw_time or get_field(record, "Time"),
+            local.strftime("%H:%M %Z"),
+        )
+        return
+    raise SystemExit(
+        f"Timezone anchor failed: {ANCHOR_EVENT_NAME} was not found for {ANCHOR_DAY}."
+    )
+
+
 def events_for_currencies(
     day: date,
     records: Iterable[dict[str, Any]],
     symbols: dict[str, tuple[str, str]],
     raw_times: dict[str, str] | None = None,
+    page_tz: ZoneInfo = ANCHOR_TZ,
 ) -> list[dict[str, Any]]:
     currencies = {currency for pair in symbols.values() for currency in pair}
     events: list[dict[str, Any]] = []
@@ -297,6 +356,7 @@ def events_for_currencies(
             day,
             raw_record,
             raw_time=(raw_times or {}).get(source_event_id) if source_event_id else None,
+            page_tz=page_tz,
         )
         if normalized is not None:
             events.append(normalized)
@@ -351,7 +411,9 @@ def write_text_file(path: Path, content: str) -> None:
     temporary_path.replace(path)
 
 
-def consolidate_to_parquet(staging_dir: Path, output_dir: Path) -> None:
+def consolidate_to_parquet(
+    staging_dir: Path, output_dir: Path, page_tz: ZoneInfo
+) -> None:
     try:
         import pyarrow as pa
         import pyarrow.parquet as pq
@@ -386,7 +448,9 @@ def consolidate_to_parquet(staging_dir: Path, output_dir: Path) -> None:
         ("previous_raw", pa.string()),
         ("source", pa.string()),
     ])
-    table = pa.Table.from_pylist(rows, schema=schema)
+    table = pa.Table.from_pylist(rows, schema=schema).replace_schema_metadata(
+        {b"page_tz": page_tz.key.encode("utf-8")}
+    )
     target = output_dir / "calendar.parquet"
     with NamedTemporaryFile(suffix=".parquet", dir=output_dir, delete=False) as stream:
         temporary_path = Path(stream.name)
@@ -395,8 +459,17 @@ def consolidate_to_parquet(staging_dir: Path, output_dir: Path) -> None:
     LOGGER.info("Wrote %s: %d events", target, len(rows))
 
 
-def write_progress(path: Path, days: set[str], symbols: dict[str, tuple[str, str]]) -> None:
-    payload = {"completed_days": sorted(days), "symbols": sorted(symbols)}
+def write_progress(
+    path: Path,
+    days: set[str],
+    symbols: dict[str, tuple[str, str]],
+    page_tz: ZoneInfo,
+) -> None:
+    payload = {
+        "completed_days": sorted(days),
+        "symbols": sorted(symbols),
+        "page_tz": page_tz.key,
+    }
     with NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as stream:
         temporary_path = Path(stream.name)
         json.dump(payload, stream, indent=2)
@@ -406,12 +479,58 @@ def write_progress(path: Path, days: set[str], symbols: dict[str, tuple[str, str
     temporary_path.replace(path)
 
 
+def rebuild_from_raw(
+    output_dir: Path,
+    staging_dir: Path,
+    symbols: dict[str, tuple[str, str]],
+    page_tz: ZoneInfo,
+    start: date,
+    end: date,
+    max_days: int | None,
+) -> tuple[set[str], int]:
+    progress_path = output_dir / "progress.json"
+    done: set[str] = set()
+    processed = 0
+    for raw_path in sorted((output_dir / "raw").glob("*.json")):
+        try:
+            day = date.fromisoformat(raw_path.stem)
+        except ValueError:
+            continue
+        if not start <= day <= end:
+            continue
+        if max_days is not None and processed >= max_days:
+            break
+        html_path = raw_path.with_suffix(".html")
+        if not html_path.is_file():
+            raise SystemExit(f"Cannot rebuild {day}: missing raw HTML {html_path}")
+        with raw_path.open(encoding="utf-8") as stream:
+            records = json.load(stream)
+        html = html_path.read_text(encoding="utf-8")
+        raw_times = extract_raw_times(html)
+        events = events_for_currencies(day, records, symbols, raw_times, page_tz)
+        write_jsonl_file(staging_dir / f"{day.isoformat()}.jsonl", events)
+        done.add(day.isoformat())
+        processed += 1
+        LOGGER.info(
+            "Rebuilt %s: %d source events, %d currency events",
+            day,
+            len(records),
+            len(events),
+        )
+    write_progress(progress_path, done, symbols, page_tz)
+    return done, processed
+
+
 def main() -> int:
     args = parse_args()
     if args.start > args.end:
         raise SystemExit("--start must be on or before --end")
     if args.retry_count < 0 or args.retry_delay < 0 or args.blocked_delay < 0 or args.request_delay < 0:
         raise SystemExit("retry and request delays must be non-negative")
+    try:
+        page_tz = ZoneInfo(args.page_tz)
+    except ZoneInfoNotFoundError as exc:
+        raise SystemExit(f"Unknown timezone: {args.page_tz}") from exc
 
     logging.basicConfig(
         level=logging.INFO,
@@ -426,38 +545,55 @@ def main() -> int:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     progress_path = args.output_dir / "progress.json"
     staging_dir = args.output_dir / "staging"
+    if not args.rebuild_from_raw and not args.skip_anchor_check:
+        anchor_records, anchor_times, _ = fetch_day(
+            ANCHOR_DAY, args.retry_count, args.retry_delay, args.blocked_delay
+        )
+        verify_anchor(anchor_records, anchor_times, page_tz)
+
     done = set() if args.force else completed_days(progress_path)
     processed = 0
     current = args.start
 
     try:
-        while current <= args.end:
-            day_key = current.isoformat()
-            daily_path = staging_dir / f"{day_key}.jsonl"
-            raw_path = args.output_dir / "raw" / f"{day_key}.json"
-            html_path = args.output_dir / "raw" / f"{day_key}.html"
-            if day_key in done and daily_path.exists() and not args.force:
-                current += timedelta(days=1)
-                continue
-            if args.max_days is not None and processed >= args.max_days:
-                break
-
-            records, raw_times, html = fetch_day(
-                current, args.retry_count, args.retry_delay, args.blocked_delay
+        if args.rebuild_from_raw:
+            done, processed = rebuild_from_raw(
+                args.output_dir,
+                staging_dir,
+                symbols,
+                page_tz,
+                args.start,
+                args.end,
+                args.max_days,
             )
-            events = events_for_currencies(current, records, symbols, raw_times)
-            write_json_file(raw_path, records)
-            write_text_file(html_path, html)
-            write_jsonl_file(daily_path, events)
-            done.add(day_key)
-            write_progress(progress_path, done, symbols)
-            processed += 1
-            LOGGER.info("Completed %s: %d source events, %d currency events", current, len(records), len(events))
-            current += timedelta(days=1)
-            if current <= args.end:
-                time.sleep(args.request_delay)
+        else:
+            while current <= args.end:
+                day_key = current.isoformat()
+                daily_path = staging_dir / f"{day_key}.jsonl"
+                raw_path = args.output_dir / "raw" / f"{day_key}.json"
+                html_path = args.output_dir / "raw" / f"{day_key}.html"
+                if day_key in done and daily_path.exists() and not args.force:
+                    current += timedelta(days=1)
+                    continue
+                if args.max_days is not None and processed >= args.max_days:
+                    break
+
+                records, raw_times, html = fetch_day(
+                    current, args.retry_count, args.retry_delay, args.blocked_delay
+                )
+                events = events_for_currencies(current, records, symbols, raw_times, page_tz)
+                write_json_file(raw_path, records)
+                write_text_file(html_path, html)
+                write_jsonl_file(daily_path, events)
+                done.add(day_key)
+                write_progress(progress_path, done, symbols, page_tz)
+                processed += 1
+                LOGGER.info("Completed %s: %d source events, %d currency events", current, len(records), len(events))
+                current += timedelta(days=1)
+                if current <= args.end:
+                    time.sleep(args.request_delay)
     finally:
-        consolidate_to_parquet(staging_dir, args.output_dir)
+        consolidate_to_parquet(staging_dir, args.output_dir, page_tz)
     LOGGER.info("Finished: %d new days, output=%s", processed, args.output_dir)
     return 0
 
